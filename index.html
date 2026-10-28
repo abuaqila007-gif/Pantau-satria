@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PANTAU SATRIA • Tactical PTT & Safety Radar</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #090d16; color: #f8fafc; user-select: none; -webkit-user-select: none; overflow-x: hidden; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .ptt-ring { transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 0 35px rgba(16, 185, 129, 0.15), inset 0 0 25px rgba(16, 185, 129, 0.1); }
+        .ptt-ring.transmitting { box-shadow: 0 0 55px rgba(239, 68, 68, 0.65), inset 0 0 30px rgba(239, 68, 68, 0.4); transform: scale(0.96); }
+        .ptt-ring.receiving { box-shadow: 0 0 55px rgba(16, 185, 129, 0.65), inset 0 0 30px rgba(16, 185, 129, 0.4); }
+        @keyframes sos-flash { 0%, 100% { background-color: rgba(127, 29, 29, 0.25); } 50% { background-color: rgba(220, 38, 38, 0.55); } }
+        .sos-active-bg { animation: sos-flash 0.7s infinite; }
+        #map { height: 290px; width: 100%; border-radius: 0.75rem; z-index: 10; }
+        .leaflet-container { background: #0f172a; }
+    </style>
+</head>
+<body id="app-body" class="min-h-screen flex flex-col justify-between max-w-md mx-auto border-x border-slate-800/80 shadow-2xl relative">
+    <header class="bg-slate-900/95 backdrop-blur border-b border-slate-800 px-3.5 py-2.5 sticky top-0 z-40">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2.5">
+                <div class="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center relative">
+                    <i data-lucide="radio" class="w-5 h-5 text-emerald-400"></i>
+                    <span id="net-dot" class="w-2.5 h-2.5 rounded-full bg-amber-400 absolute -top-1 -right-1 animate-pulse"></span>
+                </div>
+                <div>
+                    <div class="flex items-center gap-1.5">
+                        <h1 class="font-extrabold text-sm tracking-wider text-white">PANTAU SATRIA</h1>
+                        <span id="net-badge" class="text-[10px] mono px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">MENGHUBUNGKAN...</span>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mono">SEDULURAN TERAPIS RECOVERY INDONESIA</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <button onclick="openCallsignModal()" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 rounded-lg text-left transition">
+                    <div class="text-[9px] text-slate-400 mono leading-none">CALLSIGN</div>
+                    <div id="my-callsign-label" class="text-xs font-bold text-emerald-400 mono truncate max-w-[95px]">SATRIA-01</div>
+                </button>
+                <button onclick="triggerSOS()" class="bg-red-600 hover:bg-red-500 active:scale-95 text-white font-extrabold px-3 py-2 rounded-lg text-xs mono flex items-center gap-1 shadow-lg shadow-red-600/30 border border-red-400"><span>🚨</span> SOS</button>
+            </div>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5 mt-2.5">
+            <button onclick="switchChannel('ch1')" id="tab-ch1" class="ch-tab bg-emerald-600/25 border border-emerald-500 text-emerald-300 py-1.5 px-2 rounded-lg text-[11px] font-bold mono flex items-center justify-center gap-1"><span>🩺</span> CH 01 • VISIT</button>
+            <button onclick="switchChannel('ch2')" id="tab-ch2" class="ch-tab bg-slate-800/80 border border-slate-700 text-slate-400 py-1.5 px-2 rounded-lg text-[11px] font-bold mono flex items-center justify-center gap-1"><span>⛰️</span> CH 02 • GUNUNG</button>
+            <button onclick="switchChannel('ch99')" id="tab-ch99" class="ch-tab bg-slate-800/80 border border-red-900/50 text-red-400 py-1.5 px-2 rounded-lg text-[11px] font-bold mono flex items-center justify-center gap-1"><span>🚨</span> CH 99 • SOS</button>
+        </div>
+    </header>
+    <section class="bg-slate-950/90 border-b border-slate-800/80 px-3.5 py-2 flex items-center justify-between text-[11px] mono">
+        <div class="flex items-center gap-3">
+            <span class="text-slate-300 flex items-center gap-1"><i data-lucide="locate-fixed" class="w-3.5 h-3.5 text-emerald-400"></i><span id="gps-text">Mencari GPS...</span></span>
+            <span class="text-amber-400 font-bold" id="alt-text">--- MDPL</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <span id="bat-text" class="text-emerald-400 font-bold">🔋 --%</span>
+            <button onclick="sendLocationPing()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-2 py-0.5 rounded border border-slate-700 text-[10px]">📍 Ping</button>
+        </div>
+    </section>
+    <div id="sos-alert-banner" class="hidden bg-red-600/95 text-white px-4 py-3 border-b-2 border-white animate-pulse">
+        <div class="flex items-center justify-between">
+            <div>
+                <div class="font-extrabold text-xs tracking-wider uppercase flex items-center gap-1.5"><span>🚨 SINYAL DARURAT TERDETEKSI!</span></div>
+                <div id="sos-sender-info" class="text-xs mono mt-0.5">Pengirim: -</div>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <a id="sos-gmaps-link" href="#" target="_blank" class="bg-white text-red-700 font-extrabold text-xs px-2.5 py-1.5 rounded shadow">📍 G-Maps</a>
+                <button onclick="stopSOSSiren()" class="bg-red-900 text-white text-xs px-2 py-1.5 rounded border border-red-300">Matikan</button>
+            </div>
+        </div>
+    </div>
+    <main class="flex-1 px-3.5 py-3 space-y-3 overflow-y-auto">
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex items-center justify-between shadow-inner">
+            <div class="flex items-center gap-3">
+                <div id="rx-tx-indicator" class="w-3.5 h-3.5 rounded-full bg-emerald-500 shadow-lg shadow-emerald-500/50"></div>
+                <div>
+                    <div id="monitor-status" class="text-xs font-extrabold tracking-wider text-emerald-400 mono">STANDBY • SIAP MONITOR</div>
+                    <div id="monitor-sub" class="text-[11px] text-slate-400 mono">Frekuensi Aktif: CH 01 (Home Visit)</div>
+                </div>
+            </div>
+            <div class="text-right mono">
+                <div class="text-[10px] text-slate-400">ONLINE</div>
+                <div id="online-count" class="text-sm font-extrabold text-white">1 Anggota</div>
+            </div>
+        </div>
+        <div class="flex flex-col items-center py-2 relative">
+            <div class="flex items-center justify-between w-full mb-2 px-1">
+                <button onclick="togglePttMode()" id="ptt-mode-btn" class="bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold mono flex items-center gap-1.5"><span>🎙️</span> Mode: Tahan</button>
+                <button onclick="replayLastVoice()" class="bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-emerald-300 px-3 py-1.5 rounded-lg text-xs font-bold mono flex items-center gap-1.5"><span>▶️</span> Putar Pesan</button>
+            </div>
+            <button id="ptt-button" class="ptt-ring w-44 h-44 rounded-full bg-gradient-to-b from-slate-800 to-slate-950 border-4 border-emerald-500/60 flex flex-col items-center justify-center active:scale-95 select-none touch-none relative">
+                <i data-lucide="mic" id="ptt-icon" class="w-12 h-12 text-emerald-400 mb-1.5"></i>
+                <span id="ptt-main-text" class="font-extrabold text-sm tracking-widest text-white mono">TAHAN BICARA</span>
+                <span id="ptt-sub-text" class="text-[10px] text-slate-400 mono mt-1">Atau Tekan Spasi</span>
+            </button>
+        </div>
+        <div class="bg-slate-900/70 border border-slate-800/90 rounded-xl p-2.5">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mono">⚡ LAPOR STATUS & LOKASI (1-SENTUH)</span>
+                <span class="text-[10px] text-emerald-400 mono">Auto-GPS</span>
+            </div>
+            <div class="grid grid-cols-2 gap-1.5">
+                <button onclick="sendQuickStatus('🚗 OTW LOKASI PASIEN', 'emerald')" class="bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-600/40 text-emerald-300 py-2 px-2.5 rounded-lg text-xs font-bold flex items-center gap-1.5"><span>🚗</span> OTW Lokasi</button>
+                <button onclick="sendQuickStatus('🩺 MULAI TERAPI (DI LOKASI)', 'amber')" class="bg-amber-950/60 hover:bg-amber-900/60 border border-amber-600/40 text-amber-300 py-2 px-2.5 rounded-lg text-xs font-bold flex items-center gap-1.5"><span>🩺</span> Mulai Terapi</button>
+                <button onclick="sendQuickStatus('🔵 SELESAI / AMAN KEMBALI', 'sky')" class="bg-sky-950/60 hover:bg-sky-900/60 border border-sky-600/40 text-sky-300 py-2 px-2.5 rounded-lg text-xs font-bold flex items-center gap-1.5"><span>🔵</span> Selesai / Aman</button>
+                <button onclick="sendQuickStatus('⛰️ LAPOR POSISI GUNUNG', 'purple')" class="bg-purple-950/60 hover:bg-purple-900/60 border border-purple-600/40 text-purple-300 py-2 px-2.5 rounded-lg text-xs font-bold flex items-center gap-1.5"><span>⛰️</span> Pos Gunung</button>
+            </div>
+        </div>
+        <div class="bg-slate-900/70 border border-slate-800/90 rounded-xl p-2.5">
+            <div class="flex items-center justify-between mb-1.5">
+                <div>
+                    <h3 class="text-xs font-extrabold text-amber-400 flex items-center gap-1"><span>🛡️</span> TIMER PROTEKSI TERAPIS (AUTO-SOS)</h3>
+                    <p class="text-[10px] text-slate-400">Otomatis kirim SOS jika waktu habis</p>
+                </div>
+                <span id="dms-countdown" class="mono text-sm font-extrabold text-slate-300 bg-slate-950 px-2.5 py-1 rounded border border-slate-800">MATI</span>
+            </div>
+            <div class="grid grid-cols-3 gap-1.5 mt-2">
+                <button onclick="startSafetyTimer(30)" class="bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded text-xs font-bold mono border border-slate-700">30 Menit</button>
+                <button onclick="startSafetyTimer(60)" class="bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded text-xs font-bold mono border border-slate-700">60 Menit</button>
+                <button onclick="startSafetyTimer(0.25)" class="bg-amber-950/70 hover:bg-amber-900 text-amber-300 py-1.5 rounded text-xs font-bold mono border border-slate-700/50">⚡ Tes 15d</button>
+            </div>
+            <button id="dms-reset-btn" onclick="resetSafetyTimer()" class="hidden w-full mt-2 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-2 rounded-lg text-xs mono shadow-lg">✅ SAYA AMAN</button>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-2.5 space-y-2.5">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-extrabold text-white mono flex items-center gap-1.5"><span>🗺️</span> RADAR PETA ANGGOTA</span>
+                <div class="flex gap-1">
+                    <button onclick="toggleMapLayer()" id="map-layer-btn" class="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 px-2 py-1 rounded text-[10px] font-bold mono">⛰️ Topo Gunung</button>
+                    <button onclick="centerMyMap()" class="bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 px-2 py-1 rounded text-[10px] font-bold mono">🎯 Posisi Saya</button>
+                </div>
+            </div>
+            <div id="map" class="border border-slate-700/80"></div>
+            <div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-[10px] font-bold text-slate-400 mono uppercase">📻 RIWAYAT SUARA & LAPORAN</span>
+                    <button onclick="clearLogs()" class="text-[10px] text-slate-500 hover:text-slate-300 mono">Bersihkan</button>
+                </div>
+                <div id="log-container" class="space-y-1.5 max-h-52 overflow-y-auto pr-1"></div>
+            </div>
+        </div>
+    </main>
+    <div id="callsign-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-700 rounded-2xl p-4 w-full max-w-sm space-y-3">
+            <h3 class="font-extrabold text-sm text-white mono">ATUR IDENTITAS ANGGOTA SATRIA</h3>
+            <div>
+                <label class="text-xs text-slate-400 block mb-1">Nama Panggilan & Cabang/Kota:</label>
+                <input id="callsign-input" type="text" placeholder="Contoh: ADY007 - UNGARAN" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white mono focus:outline-none focus:border-emerald-500">
+            </div>
+            <div>
+                <label class="text-xs text-slate-400 block mb-1">Kode Grup Jaringan:</label>
+                <input id="room-input" type="text" value="satria-rts-nusantara" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-400 mono">
+            </div>
+            <div class="flex justify-end gap-2 pt-2">
+                <button onclick="closeCallsignModal()" class="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs font-bold">Batal</button>
+                <button onclick="saveCallsign()" class="px-4 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-extrabold">Simpan</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        lucide.createIcons();
+        let myId = 'u_' + Math.random().toString(36).substring(2, 9);
+        let myCallsign = localStorage.getItem('satria_callsign') || ('SATRIA-' + Math.floor(10 + Math.random() * 89));
+        let roomCode = localStorage.getItem('satria_room') || 'satria-rts-nusantara';
+        let currentChannel = 'ch1';
+        let pttMode = 'hold';
+        let isTransmitting = false;
+        let myLat = -7.1350, myLng = 110.4050, myAlt = 420, myBattery = 95;
+        let lastAudioUrl = null, mediaRecorder = null, audioChunks = [], mqttClient = null, membersMap = {};
+
+        document.getElementById('my-callsign-label').innerText = myCallsign;
+        document.getElementById('callsign-input').value = myCallsign;
+        document.getElementById('room-input').value = roomCode;
+
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        let audioCtx = null, sosInterval = null;
+
+        function ensureAudio() { if (!audioCtx) audioCtx = new AudioCtx(); if (audioCtx.state === 'suspended') audioCtx.resume(); }
+
+        function playHTChirp(type = 'start') {
+            ensureAudio();
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            if (type === 'start') {
+                osc.frequency.setValueAtTime(1400, now); osc.frequency.setValueAtTime(1950, now + 0.04);
+                gain.gain.setValueAtTime(0.18, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                osc.start(now); osc.stop(now + 0.1);
+            } else if (type === 'end') {
+                osc.frequency.setValueAtTime(1800, now); osc.frequency.setValueAtTime(1250, now + 0.05);
+                gain.gain.setValueAtTime(0.18, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.13);
+                osc.start(now); osc.stop(now + 0.13);
+            } else if (type === 'rx') {
+                osc.frequency.setValueAtTime(2100, now); gain.gain.setValueAtTime(0.12, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.07);
+                osc.start(now); osc.stop(now + 0.07);
+            }
+        }
+
+        function startSOSSiren() {
+            ensureAudio();
+            if (sosInterval) clearInterval(sosInterval);
+            document.getElementById('app-body').classList.add('sos-active-bg');
+            sosInterval = setInterval(() => {
+                const now = audioCtx.currentTime;
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sawtooth'; osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.frequency.setValueAtTime(680, now); osc.frequency.linearRampToValueAtTime(1180, now + 0.3);
+                gain.gain.setValueAtTime(0.25, now); gain.gain.exponentialRampToValueAtTime(0.02, now + 0.35);
+                osc.start(now); osc.stop(now + 0.35);
+            }, 420);
+        }
+
+        function stopSOSSiren() {
+            if (sosInterval) { clearInterval(sosInterval); sosInterval = null; }
+            document.getElementById('app-body').classList.remove('sos-active-bg');
+            document.getElementById('sos-alert-banner').classList.add('hidden');
+        }
+
+        const map = L.map('map', { zoomControl: false }).setView([myLat, myLng], 12);
+        const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: '© OpenStreetMap' });
+        const topoTiles = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { attribution: '© OpenTopoMap' });
+        darkTiles.addTo(map);
+        let isTopo = false, mapMarkers = {};
+
+        function toggleMapLayer() {
+            const btn = document.getElementById('map-layer-btn');
+            if (!isTopo) { map.removeLayer(darkTiles); topoTiles.addTo(map); btn.innerText = '🌑 Mode Gelap'; isTopo = true; }
+            else { map.removeLayer(topoTiles); darkTiles.addTo(map); btn.innerText = '⛰️ Topo Gunung'; isTopo = false; }
+        }
+
+        function updateMemberMarker(id, callsign, lat, lng, alt, statusText, isSOS = false) {
+            if (!lat || !lng) return;
+            const color = isSOS ? '#ef4444' : (id === myId ? '#10b981' : '#38bdf8');
+            const htmlIcon = L.divIcon({
+                className: 'custom-pin',
+                html: `<div style="background:${color};color:#000;font-weight:800;font-family:monospace;font-size:10px;padding:2px 6px;border-radius:6px;border:2px solid #fff;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.6);">${isSOS ? '🚨 ' : ''}${callsign} (${alt || '--'}m)</div>`,
+                iconSize: [100, 24], iconAnchor: [50, 12]
+            });
+            if (mapMarkers[id]) { mapMarkers[id].setLatLng([lat, lng]); mapMarkers[id].setIcon(htmlIcon); }
+            else { mapMarkers[id] = L.marker([lat, lng], { icon: htmlIcon }).addTo(map); }
+            mapMarkers[id].bindPopup(`<div style="font-family:sans-serif;font-size:12px;color:#0f172a;"><b>${callsign}</b><br/>Status: ${statusText || 'Standby'}<br/>Ketinggian: <b>${alt || '--'} MDPL</b><br/><a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" style="color:#0284c7;font-weight:bold;">📍 G-Maps</a></div>`);
+            membersMap[id] = { callsign, lat, lng };
+            document.getElementById('online-count').innerText = Object.keys(membersMap).length + ' Anggota';
+        }
+
+        function centerMyMap() { map.setView([myLat, myLng], 14); }
+
+        if (navigator.geolocation) {
+            navigator.geolocation.watchPosition((pos) => {
+                myLat = pos.coords.latitude; myLng = pos.coords.longitude;
+                myAlt = pos.coords.altitude ? Math.round(pos.coords.altitude) : 420;
+                document.getElementById('gps-text').innerText = `${myLat.toFixed(4)}, ${myLng.toFixed(4)}`;
+                document.getElementById('alt-text').innerText = `${myAlt} MDPL`;
+                updateMemberMarker(myId, myCallsign, myLat, myLng, myAlt, 'Aktif');
+            }, () => {}, { enableHighAccuracy: true });
+        }
+
+        if (navigator.getBattery) {
+            navigator.getBattery().then(bat => {
+                const updateBat = () => { myBattery = Math.round(bat.level * 100); document.getElementById('bat-text').innerText = `🔋 ${myBattery}%`; };
+                updateBat(); bat.addEventListener('levelchange', updateBat);
+            });
+        }
+
+        function getTopic(sub) { return `pantau_satria_v2/${roomCode}/${sub}`; }
+
+        function connectRealtimeServer() {
+            if (mqttClient) mqttClient.end();
+            const badge = document.getElementById('net-badge'), dot = document.getElementById('net-dot');
+            badge.innerText = 'MENGHUBUNGKAN...';
+            mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', { clientId: 'satria_' + myId + '_' + Math.floor(Math.random() * 9999), clean: true, reconnectPeriod: 3000 });
+            mqttClient.on('connect', () => {
+                badge.innerText = 'ONLINE • LIVE';
+                badge.className = 'text-[10px] mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold';
+                dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 absolute -top-1 -right-1';
+                mqttClient.subscribe(getTopic(currentChannel));
+                mqttClient.subscribe(getTopic('ch99'));
+                mqttClient.subscribe(getTopic('presence'));
+            });
+            mqttClient.on('message', (topic, message) => {
+                try { const data = JSON.parse(message.toString()); handleIncomingPacket(data); } catch (e) {}
+            });
+        }
+
+        function publishPacket(channel, payload) {
+            const fullData = { senderId: myId, callsign: myCallsign, lat: myLat, lng: myLng, alt: myAlt, battery: myBattery, channel, timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }), ...payload };
+            if (mqttClient && mqttClient.connected) mqttClient.publish(getTopic(channel), JSON.stringify(fullData));
+            handleIncomingPacket(fullData, true);
+        }
+
+        function handleIncomingPacket(data, isLocalEcho = false) {
+            if (!isLocalEcho && data.senderId === myId) return;
+            updateMemberMarker(data.senderId, data.callsign, data.lat, data.lng, data.alt, data.text || 'Suara', data.type === 'sos');
+            if (data.type === 'voice') {
+                if (!isLocalEcho) { playHTChirp('rx'); playIncomingVoice(data.audioBase64, data.callsign); }
+                addLogItem(data);
+            } else if (data.type === 'status') {
+                if (!isLocalEcho) playHTChirp('rx');
+                addLogItem(data);
+            } else if (data.type === 'sos') {
+                startSOSSiren();
+                document.getElementById('sos-alert-banner').classList.remove('hidden');
+                document.getElementById('sos-sender-info').innerText = `${data.callsign} • ${data.alt} MDPL`;
+                document.getElementById('sos-gmaps-link').href = `https://www.google.com/maps?q=${data.lat},${data.lng}`;
+                map.setView([data.lat, data.lng], 15);
+                addLogItem(data);
+            }
+        }
+
+        async function startVoiceCapture() {
+            if (isTransmitting) return;
+            ensureAudio();
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioChunks = [];
+                const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 16000 } : {};
+                mediaRecorder = new MediaRecorder(stream, options);
+                mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+                mediaRecorder.onstop = () => {
+                    stream.getTracks().forEach(t => t.stop());
+                    const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+                    const reader = new FileReader();
+                    reader.onloadend = () => { lastAudioUrl = reader.result; publishPacket(currentChannel, { type: 'voice', text: '🎙️ Pesan Suara PTT', audioBase64: reader.result }); };
+                    reader.readAsDataURL(blob);
+                };
+                mediaRecorder.start(); isTransmitting = true; playHTChirp('start'); updatePTTUI('tx');
+            } catch (err) { alert('Izinkan akses Mikrofon.'); }
+        }
+
+        function stopVoiceCapture() {
+            if (!isTransmitting) return;
+            isTransmitting = false;
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+            playHTChirp('end'); updatePTTUI('idle');
+        }
+
+        function playIncomingVoice(base64Audio, senderCallsign) {
+            lastAudioUrl = base64Audio; updatePTTUI('rx', senderCallsign);
+            const audio = new Audio(base64Audio);
+            audio.onended = () => { playHTChirp('end'); updatePTTUI('idle'); };
+            audio.play().catch(() => updatePTTUI('idle'));
+        }
+
+        function replayLastVoice() {
+            if (!lastAudioUrl) { alert('Belum ada pesan suara.'); return; }
+            new Audio(lastAudioUrl).play();
+        }
+
+        function updatePTTUI(state, speaker = '') {
+            const btn = document.getElementById('ptt-button'), status = document.getElementById('monitor-status'), dot = document.getElementById('rx-tx-indicator'), mainText = document.getElementById('ptt-main-text');
+            btn.classList.remove('transmitting', 'receiving');
+            if (state === 'tx') {
+                btn.classList.add('transmitting'); status.innerText = 'TRANSMITTING • MENGIRIM...'; status.className = 'text-xs font-extrabold tracking-wider text-red-400 mono'; dot.className = 'w-3.5 h-3.5 rounded-full bg-red-500 animate-ping'; mainText.innerText = 'SEDANG BICARA';
+            } else if (state === 'rx') {
+                btn.classList.add('receiving'); status.innerText = `RECEIVING • ${speaker}`; status.className = 'text-xs font-extrabold tracking-wider text-emerald-300 mono'; dot.className = 'w-3.5 h-3.5 rounded-full bg-emerald-400 animate-ping'; mainText.innerText = 'SUARA MASUK';
+            } else {
+                status.innerText = 'STANDBY • SIAP MONITOR'; status.className = 'text-xs font-extrabold tracking-wider text-emerald-400 mono'; dot.className = 'w-3.5 h-3.5 rounded-full bg-emerald-500'; mainText.innerText = pttMode === 'hold' ? 'TAHAN BICARA' : 'SENTUH BICARA';
+            }
+        }
+
+        const pttBtn = document.getElementById('ptt-button');
+        pttBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); if (pttMode === 'hold') startVoiceCapture(); else isTransmitting ? stopVoiceCapture() : startVoiceCapture(); });
+        pttBtn.addEventListener('pointerup', (e) => { e.preventDefault(); if (pttMode === 'hold' && isTransmitting) stopVoiceCapture(); });
+
+        function togglePttMode() {
+            pttMode = pttMode === 'hold' ? 'toggle' : 'hold';
+            document.getElementById('ptt-mode-btn').innerHTML = pttMode === 'hold' ? '<span>🎙️</span> Mode: Tahan' : '<span>🔒</span> Mode: 1-Tap';
+            updatePTTUI('idle');
+        }
+
+        function sendQuickStatus(statusText, color) { publishPacket(currentChannel, { type: 'status', text: statusText, color }); }
+        function sendLocationPing() { sendQuickStatus('📍 Melaporkan GPS', 'emerald'); centerMyMap(); }
+        function triggerSOS(reason = '🚨 SINYAL DARURAT SOS!') { switchChannel('ch99'); publishPacket('ch99', { type: 'sos', text: reason }); }
+
+        let dmsTimer = null, dmsSecondsLeft = 0;
+        function startSafetyTimer(minutes) {
+            if (dmsTimer) clearInterval(dmsTimer);
+            dmsSecondsLeft = Math.round(minutes * 60);
+            document.getElementById('dms-reset-btn').classList.remove('hidden');
+            sendQuickStatus(`🛡️ Timer Proteksi (${minutes}m)`, 'amber');
+            dmsTimer = setInterval(() => {
+                dmsSecondsLeft--;
+                const m = String(Math.floor(dmsSecondsLeft / 60)).padStart(2, '0');
+                const s = String(dmsSecondsLeft % 60).padStart(2, '0');
+                const disp = document.getElementById('dms-countdown');
+                disp.innerText = `${m}:${s}`;
+                disp.className = 'mono text-sm font-extrabold text-amber-300 bg-amber-950 px-2.5 py-1 rounded border border-amber-500 animate-pulse';
+                if (dmsSecondsLeft <= 0) { clearInterval(dmsTimer); dmsTimer = null; triggerSOS('🚨 AUTO-SOS: TIMER HABIS!'); }
+            }, 1000);
+        }
+
+        function resetSafetyTimer() {
+            if (dmsTimer) clearInterval(dmsTimer);
+            dmsTimer = null;
+            const disp = document.getElementById('dms-countdown');
+            disp.innerText = 'AMAN'; disp.className = 'mono text-sm font-extrabold text-emerald-400 bg-slate-950 px-2.5 py-1 rounded border border-emerald-700';
+            document.getElementById('dms-reset-btn').classList.add('hidden');
+            stopSOSSiren();
+            sendQuickStatus('✅ Konfirmasi AMAN', 'emerald');
+        }
+
+        function switchChannel(ch) {
+            if (mqttClient && mqttClient.connected) { mqttClient.unsubscribe(getTopic(currentChannel)); mqttClient.subscribe(getTopic(ch)); }
+            currentChannel = ch;
+            document.querySelectorAll('.ch-tab').forEach(el => { el.className = 'ch-tab bg-slate-800/80 border border-slate-700 text-slate-400 py-1.5 px-2 rounded-lg text-[11px] font-bold mono flex items-center justify-center gap-1'; });
+            const activeTab = document.getElementById('tab-' + ch);
+            activeTab.className = ch === 'ch99' ? 'ch-tab bg-red-600/30 border border-red-500 text-red-300 py-1.5 px-2 rounded-lg text-[11px] font-bold mono flex items-center justify-center gap-1' : 'ch-tab bg-emerald-600/25 border border-emerald-500 text-emerald-300 py-1.5 px-2 rounded-lg text-[11px] font-bold mono flex items-center justify-center gap-1';
+            const names = { ch1: 'CH 01 (Home Visit)', ch2: 'CH 02 (Gunung)', ch99: 'CH 99 (Darurat)' };
+            document.getElementById('monitor-sub').innerText = `Frekuensi Aktif: ${names[ch]}`;
+        }
+
+        function addLogItem(data) {
+            const container = document.getElementById('log-container'), div = document.createElement('div');
+            const isSOS = data.type === 'sos';
+            div.className = `p-2 rounded-lg border text-xs flex items-center justify-between ${isSOS ? 'bg-red-950/70 border-red-500 text-red-200' : 'bg-slate-950/80 border-slate-800 text-slate-200'}`;
+            div.innerHTML = `<div class="space-y-0.5"><div class="flex items-center gap-1.5"><span class="font-extrabold mono text-emerald-400">${data.callsign}</span><span class="text-[10px] text-slate-400 mono">• ${data.timestamp} • ${data.alt || '--'}m</span></div><div class="font-semibold">${data.text}</div></div><div class="flex items-center gap-1">${data.audioBase64 ? `<button onclick="playIncomingVoice('${data.audioBase64}', '${data.callsign}')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-1 rounded text-[10px] font-bold mono">▶️ Putar</button>` : ''}<a href="https://www.google.com/maps?q=${data.lat},${data.lng}" target="_blank" class="bg-slate-800 hover:bg-slate-700 text-sky-300 px-2 py-1 rounded text-[10px] font-bold mono border border-slate-700">📍 Peta</a></div>`;
+            container.prepend(div);
+        }
+
+        function clearLogs() { document.getElementById('log-container').innerHTML = ''; }
+        function openCallsignModal() { document.getElementById('callsign-modal').classList.remove('hidden'); }
+        function closeCallsignModal() { document.getElementById('callsign-modal').classList.add('hidden'); }
+        function saveCallsign() {
+            const val = document.getElementById('callsign-input').value.trim().toUpperCase();
+            const rm = document.getElementById('room-input').value.trim().toLowerCase();
+            if (val) { myCallsign = val; localStorage.setItem('satria_callsign', myCallsign); document.getElementById('my-callsign-label').innerText = myCallsign; }
+            if (rm) { roomCode = rm; localStorage.setItem('satria_room', roomCode); }
+            closeCallsignModal(); connectRealtimeServer();
+            updateMemberMarker(myId, myCallsign, myLat, myLng, myAlt, 'Aktif');
+        }
+
+        connectRealtimeServer();
+    </script>
+</body>
+</html>
